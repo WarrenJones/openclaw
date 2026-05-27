@@ -31,8 +31,10 @@ vi.mock("../../config/config.js", async () => {
     loadConfig: () => loadConfigMock() as never,
   };
 });
+const a2aFlowMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+
 vi.mock("./sessions-send-tool.a2a.js", () => ({
-  runSessionsSendA2AFlow: vi.fn(),
+  runSessionsSendA2AFlow: (...args: unknown[]) => a2aFlowMock(...args),
 }));
 
 let createSessionsListTool: typeof import("./sessions-list-tool.js").createSessionsListTool;
@@ -620,5 +622,112 @@ describe("sessions_send gating", () => {
       reply: undefined,
       sessionKey: MAIN_AGENT_SESSION_KEY,
     });
+  });
+
+  it("skips A2A and sets delivery skipped for self waited sends", async () => {
+    loadConfigMock.mockReturnValue({
+      session: { scope: "per-sender", mainKey: "main" },
+      tools: { agentToAgent: { enabled: true } },
+    });
+    await installRegistry();
+    a2aFlowMock.mockReset();
+
+    const tool = createMainSessionsSendTool();
+    let historyCalls = 0;
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      if (request.method === "sessions.list") {
+        return {
+          path: "/tmp/sessions.json",
+          sessions: [{ key: MAIN_AGENT_SESSION_KEY, kind: "direct" }],
+        };
+      }
+      if (request.method === "agent") {
+        return { runId: "run-self-a2a", acceptedAt: 123 };
+      }
+      if (request.method === "agent.wait") {
+        return { runId: "run-self-a2a", status: "ok" };
+      }
+      if (request.method === "chat.history") {
+        historyCalls += 1;
+        if (historyCalls === 1) {
+          return { messages: [] };
+        }
+        return {
+          messages: [
+            { role: "assistant", content: [{ type: "text", text: "ACK-SELF" }], timestamp: 20 },
+          ],
+        };
+      }
+      return {};
+    });
+
+    const result = await tool.execute("call-self-a2a", {
+      sessionKey: MAIN_AGENT_SESSION_KEY,
+      message: "ping",
+      timeoutSeconds: 5,
+    });
+
+    expect(result.details).toMatchObject({
+      status: "ok",
+      reply: "ACK-SELF",
+      delivery: { status: "skipped", mode: "announce" },
+    });
+    expect(a2aFlowMock).not.toHaveBeenCalled();
+  });
+
+  it("starts A2A with pending delivery for peer waited sends", async () => {
+    loadConfigMock.mockReturnValue({
+      session: { scope: "per-sender", mainKey: "main" },
+      tools: { agentToAgent: { enabled: true } },
+    });
+    await installRegistry();
+    a2aFlowMock.mockReset();
+
+    const tool = createMainSessionsSendTool();
+    let historyCalls = 0;
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: Record<string, unknown> };
+      if (request.method === "sessions.list") {
+        return {
+          path: "/tmp/sessions.json",
+          sessions: [
+            { key: MAIN_AGENT_SESSION_KEY, kind: "direct" },
+            { key: "agent:other:main", kind: "direct" },
+          ],
+        };
+      }
+      if (request.method === "agent") {
+        return { runId: "run-peer-a2a", acceptedAt: 456 };
+      }
+      if (request.method === "agent.wait") {
+        return { runId: "run-peer-a2a", status: "ok" };
+      }
+      if (request.method === "chat.history") {
+        historyCalls += 1;
+        if (historyCalls === 1) {
+          return { messages: [] };
+        }
+        return {
+          messages: [
+            { role: "assistant", content: [{ type: "text", text: "ACK-PEER" }], timestamp: 20 },
+          ],
+        };
+      }
+      return {};
+    });
+
+    const result = await tool.execute("call-peer-a2a", {
+      sessionKey: "agent:other:main",
+      message: "hello peer",
+      timeoutSeconds: 5,
+    });
+
+    expect(result.details).toMatchObject({
+      status: "ok",
+      reply: "ACK-PEER",
+      delivery: { status: "pending", mode: "announce" },
+    });
+    expect(a2aFlowMock).toHaveBeenCalledTimes(1);
   });
 });

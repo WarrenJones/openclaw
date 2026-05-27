@@ -288,7 +288,7 @@ export function createSessionsSendTool(opts?: {
       const requesterSessionKey = opts?.agentSessionKey;
       const requesterChannel = opts?.agentChannel;
       const maxPingPongTurns = resolvePingPongTurns(cfg);
-      const delivery = { status: "pending", mode: "announce" as const };
+      let delivery = { status: "pending", mode: "announce" as const };
       const startA2AFlow = (roundOneReply?: string, waitRunId?: string) => {
         void runSessionsSendA2AFlow({
           targetSessionKey: resolvedKey,
@@ -359,7 +359,15 @@ export function createSessionsSendTool(opts?: {
         });
       }
       const reply = result.replyText;
-      startA2AFlow(reply ?? undefined);
+      // Only run A2A announce for cross-session (peer) waited sends.
+      // When the requester and target are the same session (self/owned-child),
+      // the inline reply is already delivered to the caller; running A2A would
+      // announce the same reply again, causing a duplicate.
+      if (requesterSessionKey !== resolvedKey) {
+        startA2AFlow(reply ?? undefined);
+      } else {
+        delivery.status = "skipped";
+      }
 
       return jsonResult({
         runId,
